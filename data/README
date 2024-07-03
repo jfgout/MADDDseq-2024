@@ -1,0 +1,12 @@
+Data from the MADDD-seq pipeline
+
+In the R scripts, the line that says:
+# BD_DATA <- "C:/lab/TR_ERRORS/Projects/YeastMNNG-XP/Jason/data/2022-04-NewPipeLine/yeast"
+
+should be updated to point to the folder where this archive is extracted.
+
+There is one sub-folder per sample. For each sample, the most important files are:
+
+* max_variants_2.adduct.gtf : A GTF file with the location (and details) about each adduct called by the pipepline
+* max_variants_2.DSC.vcf.gz : A VCF (Variant Call File) with information about mutations called.
+* coverage.rds : pre-computed coverage information in binary format to be loaded in R.
