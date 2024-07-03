@@ -1,0 +1,287 @@
+---
+title: "Yeast MNNG treatment time series in WT & MGT-1 genotypes"
+author: "JF GOUT"
+date: "7/9/2021"
+output: html_document
+params:
+  showCode: TRUE
+---
+
+```{r setup, include=FALSE}
+library("knitr")
+options(width=1200)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r intro, echo=F, message=F, warning=F}
+rm(list=ls())
+# Modify this part to set the working directory to a location on your computer:
+setwd("C:/lab/TR_ERRORS/Projects/YeastMNNG-XP/Kallisto/")
+BD_H5 = paste(getwd(), "/h5/", sep="") # <- Folder containing all the .h5 files from Kallisto
+
+source("myDESeq2.R")
+
+library("tximport")
+library("DESeq2")
+library("ggplot2")
+
+MAX_PVAL = 0.01 # <- Maximum p-value for reporting significant genes (after adjustement for multiple testing)
+MIN_ROW_SUM = 500 # <- Remove genes that have fewer than this number of sum counts.
+REMAKE_TX2 = F
+
+blind = T
+nbTopGenes = 50 # <- Number of genes to use in clustering experiment
+heatmapPDF = "heatmap.pdf"
+
+
+################################################################################
+if( REMAKE_TX2 == T){
+  # Building the table that links transcripts to genes:
+  ENSMBL_103 = "AH89534"
+  library("ensembldb")
+  library(AnnotationHub)
+  ah <- AnnotationHub()
+  edb <- ah[["AH89534"]] # <- Ensembl 103
+
+  # This is the command allowing you to find the value of "AH89457"
+  #ahDb <- query(ah, pattern = c("Saccharomyces cerevisiae", "EnsDb", 103))
+
+  txs <- transcripts(edb, return.type = "DataFrame")
+  tl = txs[ , c("tx_id_version", "gene_id")]
+  colnames(tl) = c("TXNAME", "GENEID")
+  # ADD SOMETHING TO REMOVE THE "mRNA" PREFIX
+  write.table(tl, file="gene_transcript_link-103.tab", col.names=T, row.names=F, quote=F, sep="\t")
+}
+################################################################################
+
+tx2gene = read.table("gene_transcript_link-103.tab", h=T, as.is=T, sep="\t")
+nbGenesTx = nrow(tx2gene)
+
+designTable = read.table("design.tab", h=T, as.is=T, sep="\t")
+
+```
+
+## Introduction.
+
+This experiment was looking at expression level of genes in yeast cells exposed to MNNG. The design is 
+fairly complex with two different genotypes (WT, MGT1-KO) and two different replication status (dividing cells vs arrested cells). For each genotype/replication status, cells were exposed to MNNG and RNA was extracted immediately after exposure (time point 1), 2, 6 and 24 hours after exposure (time points 2, 6 and 24). Time points labeled as 0 correspond to cells not exposed to MNNG.  
+  
+Each time point was done in triplicate, except for *Arrested cells MGT1-KO treated* for which we have only 2 replicates (library prep failed for one of the replicates?).
+
+
+## Results.
+
+### Genes/Samples clustering
+
+
+First, I performed a simple heatmap clustering analysis, using the top `r nbTopGenes` most highly expressed genes (note: the clustering does not change when using more genes).  
+
+The corresponding graph is also available as a separate PDF file: [`r heatmapPDF`](`r heatmapPDF`).  
+  
+  
+It is a lot easier to read the graph from the PDF file (I could not make the graph larger in the HTML report)
+
+```{r clustering, echo=F, message=F, warning=F, out.width="100%"}
+library("pheatmap")
+library("vsn")
+library("hexbin")
+
+vTimes = c(c(0,1,2,6,24)) # <- It can be useful to exclude some time points from the analysis
+
+samples = jf_prepareSamples(designTable = designTable, vTimes = vTimes)
+
+lRes = jf_runDESeq2(samples = samples,
+                    tx2gene = tx2gene,
+                    design = ~ReplicationStatus + Genotype + Time,
+                    MIN_ROW_SUM = MIN_ROW_SUM
+                    )
+
+dds = lRes[["dds"]]
+vsd <- vst(dds, blind=blind)
+select <- order(rowMeans(counts(dds,normalized=T)), decreasing=TRUE)[1:nbTopGenes]
+df <- as.data.frame(colData(dds)[,c("Genotype","Treated", "ReplicationStatus", "Time")])
+ph <- pheatmap(assay(vsd)[select,], cluster_rows=T, show_rownames=T, cluster_cols=T, annotation_col=df)
+pdf(file=heatmapPDF, width=14, height=10)
+ph
+dev.off()
+
+```
+
+Strangely, the MGT1-KO 24h samples cluster together. I'm not sure exactly why that would be the case.
+Other than that, clustering seems to happen first by replication status (diving vs arrested) and then by time following exposure to MNNG.  
+  
+  
+I also generated the PCA plot:  
+  
+  
+  
+
+```{r PCAplot, echo=F, results='asis', out.width="100%"}
+plotPCA(vsd, intgroup=c("ReplicationStatus", "Genotype", "Time"))
+
+```
+
+
+### Differentially expressed genes
+
+#### 1. Treated vs Untreated
+
+I started by calling differentially expressed genes based only on exposure to MNNG vs no exposure (= genes that respond to MNNG exposure no matter what genotype/replication status we look at). I excluded the 6 hours and 24 hours time points and considered as "treated" the time point 1 (= zero hours after exposure) and 2 (= 2 hours post exposure).
+
+
+```{r difXP-1, echo=F, message=FALSE, warning=FALSE, results='asis', out.width="100%"}
+
+fOut = "DE-genes-Treated_vs_Untreated-1.csv"
+vTimes = c(c(0,1,2)) # <- It can be useful to exclude some time points from the analysis
+
+samples = jf_prepareSamples(designTable = designTable, vTimes = vTimes)
+
+lRes = jf_runDESeq2(samples = samples,
+                    tx2gene = tx2gene,
+                    design = ~ReplicationStatus + Genotype + Treated,
+                    MIN_ROW_SUM = MIN_ROW_SUM
+                    )
+
+to = jf_printDESeqResult(lRes, fOut=fOut, maxPval = 0.05,maxGenesDisplay = 20)
+
+```
+
+
+#### 1.b) Gene ontology analysis on DE genes.
+
+I used topGO to search for functional categories enriched in differentially expressed genes.
+
+
+```{r topGO-1, echo=F, message=FALSE,warning=FALSE, results='asis'}
+
+library("topGO")
+library("ALL")
+library("hgu95av2.db")
+library("org.Sc.sgd.db")
+library("Rgraphviz")
+
+padjustCutOff = 0.05
+padjustMethod = "fdr"
+statForGO = "fisher"
+algorithm = "elim"
+
+sel_pval <- function(allScore){ return(allScore < 0.05)}
+
+vOntologies = c("BP" = "Biological Process", "MF" = "Molecular Function", "CC" = "Cellular Component")
+
+for(ontology in names(vOntologies)){
+  ontologyFullName = vOntologies[ontology]
+
+  lresGO = my_runGO(statForGO = statForGO, 
+                    algorithm = algorithm, 
+                    geneUniverse = getGeneUniverse(lRes[["DESeq2res"]]), 
+                    geneSel = sel_pval,
+                    ontology = ontology,
+                    padjust = padjustMethod,
+                    padjustCutOff = padjustCutOff
+                    )
+
+  tGO = lresGO[["resTable"]]
+  
+  cat("\n  \n### ", ontologyFullName, ":\n  \n", sep="")
+
+  if( nrow(tGO)>0 ){
+    print(kable(tGO))
+  } else {
+    cat("Nofunctional category significantly over-represented.\n  \n")
+  }
+  
+}
+
+
+
+
+```
+
+
+#### 2. Treated vs Untreated controlled for genotype
+
+I then looked for genes whose expression level changes with MNNG treatment in a genotype-specific manner (for example, a gene that is over-expressed upon exposure in WT but shows no change in MGT1-KO cells).
+
+
+
+```{r difXP-Geno-1, echo=F, message=FALSE, warning=FALSE, results='asis', out.width="100%"}
+
+design = ~ ReplicationStatus + Genotype + Treated + Genotype:Treated
+
+cat("\n  \nThis corresponds to the following formula in DESeq2: ")
+print(design)
+cat("\n  \n")
+
+fOut = "DE-genes-Treatment-vs-Genotype-1.csv"
+vTimes = c(c(0,1,2)) # <- It can be useful to exclude some time points from the analysis
+
+samples = jf_prepareSamples(designTable = designTable, vTimes = vTimes)
+samples$group = paste(samples$Genotype, samples$Treated, sep="_")
+samples$group = factor(samples$group)
+
+lRes = jf_runDESeq2(samples = samples,
+                    tx2gene = tx2gene,
+                    design = design,
+                    MIN_ROW_SUM = MIN_ROW_SUM
+                    )
+dds = lRes[["dds"]]
+
+to = jf_printDESeqResult(lRes, fOut=fOut, maxPval = 0.05,maxGenesDisplay = 20)
+
+cat("\n  \nIT LOOKS LIKE SOMETHING WENT WRONG WITH THE CORRECTION FOR MULTIPLE TESTING...\n  \n  \n")
+
+cat("Below is a graph showing the expression level for the most significant gene. . (YES/NO = Treat/Untreatd --> MGT_NO = MGT1-KO untreated)\n  \n  \n")
+
+d <- plotCounts(dds, gene=rownames(to)[1], intgroup = "group", returnData = T)
+ggplot(d, aes(x=group, y=count)) + 
+  geom_point(position=position_jitter(w=0.1,h=0))
+
+cat("As you can see, the effect is not spectacular. It looks like the genotype (MGT1-KO/WT) does not have a strong impact on the gene expression regulation upon exposure to MNNG.\n  \n")
+
+```
+
+I then used a different strategy: a Likelihood ratio test to test for a difference at any time point of the time series between WT and MGT1-KO.
+
+
+
+```{r difXP-Geno-LRT, echo=F, message=FALSE, warning=FALSE, results='asis', out.width="100%"}
+
+design = ~ ReplicationStatus + Genotype + Time + Genotype:Time
+reduced = ~ ReplicationStatus + Genotype + Time
+
+cat("\n  \nThis corresponds to the following formula in DESeq2: ")
+print(design)
+cat("\n  \n")
+cat("\n  \nAnd the following reduced formula: ")
+print(design)
+cat("\n  \nSee: [http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#likelihood-ratio-test](http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#likelihood-ratio-test)\n  \n  \n")
+
+
+fOut = "DE-genes-Treatment-vs-Genotype-2.csv"
+vTimes = c(c(0,1,2,6,24)) # <- It can be useful to exclude some time points from the analysis
+
+samples = jf_prepareSamples(designTable = designTable, vTimes = vTimes)
+samples$group = paste(samples$Genotype, samples$Time, sep="_")
+samples$group = factor(samples$group, levels = c( paste("WT", vTimes, sep="_"), paste("MGT", vTimes, sep="_") ) )
+
+
+lRes = jf_runDESeq2(samples = samples,
+                    tx2gene = tx2gene,
+                    design = design,
+                    reduced = reduced,
+                    MIN_ROW_SUM = MIN_ROW_SUM
+                    )
+dds = lRes[["dds"]]
+
+to = jf_printDESeqResult(lRes, fOut=fOut, maxPval = 0.05,maxGenesDisplay = 20)
+
+cat("Below is a graph showing the expression level for the most significant gene. The effect is exclusively driven by the lower expression level at the 24 hours time point in MGT1-KO samples.\n  \n  \n")
+
+d <- plotCounts(dds, gene=rownames(to)[1], intgroup = "group", returnData = T)
+ggplot(d, aes(x=group, y=count)) + 
+  geom_point(position=position_jitter(w=0.1,h=0))
+
+
+
+```
